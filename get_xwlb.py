@@ -4,6 +4,7 @@ import re
 import html as html_module
 import sys
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 session = requests.Session()
@@ -13,16 +14,17 @@ session.headers.update({
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 })
 
-def fetch_html(url, timeout=15):
-    for attempt in range(2):
+def fetch_html(url, timeout=15, retries=2):
+    for attempt in range(retries):
         try:
             response = session.get(url, timeout=timeout)
             response.encoding = 'utf-8'
             return response.text
-        except:
-            if attempt == 0:
-                continue
-            return None
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(1)
+            else:
+                return None
     return None
 
 def fetch_detail_content(url):
@@ -59,19 +61,34 @@ def fetch_detail_content(url):
 
 def fetch_all_details_concurrent(news_items, max_workers=5):
     results = {}
+    total = len(news_items)
+    completed = [0]
+    failed = [0]
     
     def fetch_one(item):
         content = fetch_detail_content(item['url'])
+        if not content:
+            content = fetch_detail_content(item['url'])
         return item['url'], content
     
+    print(f"  共 {total} 条新闻待获取...")
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(fetch_one, item) for item in news_items]
+        futures = {executor.submit(fetch_one, item): item for item in news_items}
         for future in as_completed(futures):
             url, content = future.result()
             results[url] = content
+            completed[0] += 1
+            if content is None:
+                failed[0] += 1
+                print(f"  [{completed[0]}/{total}] 获取失败: {futures[future]['title'][:20]}...")
+            else:
+                print(f"  [{completed[0]}/{total}] 已获取: {futures[future]['title'][:20]}...")
     
     for item in news_items:
         item['content'] = results.get(item['url'])
+    
+    return failed[0]
 
 def is_brief_news(title):
     return '快讯' in title
@@ -219,6 +236,7 @@ def main():
     year, month, day = d.year, d.month, d.day
     date_str = f"{year}年{month:02d}月{day:02d}日"
     target_str = f"{year}{month:02d}{day:02d}"
+    run_str = datetime.now().strftime("%Y%m%d")
     
     print(f"正在获取 {date_str} 的新闻联播内容...")
     
@@ -240,7 +258,7 @@ def main():
     
     ext = ".md" if use_md else ".txt"
     summary_file = os.path.join(summary_dir, f"{target_str}_summary{ext}")
-    detail_file = os.path.join(detail_dir, f"{target_str}_detail{ext}")
+    detail_file = os.path.join(detail_dir, f"{target_str}_{run_str}_detail{ext}")
     
     if use_md:
         summary = format_md_summary(date_str, news_items)
@@ -255,7 +273,17 @@ def main():
     if len(sys.argv) > 2:
         print(f"\n正在并发获取所有新闻的详细内容（5线程）...")
         
-        fetch_all_details_concurrent(news_items)
+        failed_count = fetch_all_details_concurrent(news_items)
+        
+        success_count = len(news_items) - failed_count
+        
+        if success_count == 0:
+            print(f"\n警告: 所有 {len(news_items)} 条新闻详情获取失败！")
+            print("可能原因: 网络问题或服务器暂时不可用，请稍后重试。")
+            return
+        
+        if failed_count > 0:
+            print(f"\n提示: {failed_count} 条新闻详情获取失败，已跳过。")
         
         if use_md:
             detail = format_md_detail(date_str, news_items)
@@ -264,7 +292,8 @@ def main():
         
         with open(detail_file, "w", encoding="utf-8") as f:
             f.write(detail)
-        print(f"详情已保存到: {detail_file}")
+        print(f"\n详情已保存到: {detail_file}")
+        print(f"成功获取 {success_count}/{len(news_items)} 条新闻详情。")
 
 if __name__ == "__main__":
     main()
